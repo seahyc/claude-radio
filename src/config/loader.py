@@ -113,9 +113,6 @@ def _validate_config(settings: Settings) -> None:
         raise InvalidConfigError(f"Error accessing approved directory: {e}") from e
 
     # Validate feature dependencies
-    if settings.enable_mcp and not settings.mcp_config_path:
-        raise InvalidConfigError("MCP enabled but no config path provided")
-
     if settings.enable_token_auth and not settings.auth_token_secret:
         raise InvalidConfigError("Token auth enabled but no secret provided")
 
@@ -144,8 +141,6 @@ def _validate_config(settings: Settings) -> None:
 def _get_enabled_features_summary(settings: Settings) -> list[str]:
     """Get a summary of enabled features for logging."""
     features = []
-    if settings.enable_mcp:
-        features.append("mcp")
     if settings.enable_git_integration:
         features.append("git")
     if settings.enable_file_uploads:

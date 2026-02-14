@@ -14,11 +14,6 @@ class FeatureFlags:
         self.settings = settings
 
     @property
-    def mcp_enabled(self) -> bool:
-        """Check if Model Context Protocol is enabled."""
-        return self.settings.enable_mcp and self.settings.mcp_config_path is not None
-
-    @property
     def git_enabled(self) -> bool:
         """Check if Git integration is enabled."""
         return self.settings.enable_git_integration
@@ -59,7 +54,6 @@ class FeatureFlags:
     def is_feature_enabled(self, feature_name: str) -> bool:
         """Generic feature check by name."""
         feature_map = {
-            "mcp": self.mcp_enabled,
             "git": self.git_enabled,
             "file_uploads": self.file_uploads_enabled,
             "quick_actions": self.quick_actions_enabled,
@@ -73,8 +67,6 @@ class FeatureFlags:
     def get_enabled_features(self) -> list[str]:
         """Get list of all enabled features."""
         features = []
-        if self.mcp_enabled:
-            features.append("mcp")
         if self.git_enabled:
             features.append("git")
         if self.file_uploads_enabled:

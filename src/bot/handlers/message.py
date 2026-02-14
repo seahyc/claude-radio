@@ -707,6 +707,69 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def handle_voice_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle voice messages — transcribe and process through the voice pipeline."""
+    user_id = update.effective_user.id
+    settings: Settings = context.bot_data["settings"]
+
+    # Check if voice pipeline is available
+    voice_pipeline = context.bot_data.get("voice_pipeline")
+
+    if not voice_pipeline:
+        await update.message.reply_text(
+            "🎤 *Voice messages received*\n\n"
+            "Voice processing is not yet configured.\n"
+            "Set `VOICE_MODE=on` or `VOICE_MODE=auto` and install "
+            "local Whisper model to enable.",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        # Get voice file
+        voice = update.message.voice or update.message.audio
+        if not voice:
+            return
+
+        progress_msg = await update.message.reply_text(
+            "🎤 Transcribing voice message...",
+            reply_to_message_id=update.message.message_id,
+        )
+
+        # Download voice file
+        voice_file = await voice.get_file()
+        voice_bytes = await voice_file.download_as_bytearray()
+
+        # Process through voice pipeline
+        result = await voice_pipeline.process_voice_input(
+            audio_data=bytes(voice_bytes),
+            user_id=user_id,
+            chat_id=update.effective_chat.id,
+            context=context,
+        )
+
+        await progress_msg.delete()
+
+        if result:
+            await update.message.reply_text(
+                result,
+                parse_mode="Markdown",
+                reply_to_message_id=update.message.message_id,
+            )
+
+    except Exception as e:
+        logger.error("Voice message processing failed", error=str(e), user_id=user_id)
+        try:
+            await progress_msg.delete()
+        except:
+            pass
+        await update.message.reply_text(
+            f"❌ Failed to process voice message: {str(e)}"
+        )
+
+
 def _estimate_text_processing_cost(text: str) -> float:
     """Estimate cost for processing text message."""
     # Base cost

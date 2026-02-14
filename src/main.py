@@ -18,7 +18,10 @@ from src.claude import (
     SessionManager,
     ToolMonitor,
 )
+from src.agents.manager import AgentProcessManager
 from src.claude.sdk_integration import ClaudeSDKManager
+from src.webhooks.router import WebhookRouter
+from src.webhooks.server import WebhookServer
 from src.config.features import FeatureFlags
 from src.config.loader import load_config
 from src.config.settings import Settings
@@ -151,6 +154,12 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         tool_monitor=tool_monitor,
     )
 
+    # Create multi-agent process manager
+    agent_manager = AgentProcessManager(
+        settings=config,
+        claude_integration=claude_integration,
+    )
+
     # Create bot with all dependencies
     dependencies = {
         "auth_manager": auth_manager,
@@ -159,17 +168,26 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "audit_logger": audit_logger,
         "claude_integration": claude_integration,
         "storage": storage,
+        "agent_manager": agent_manager,
     }
 
     bot = ClaudeCodeBot(config, dependencies)
 
     logger.info("Application components created successfully")
 
+    # Webhook notification router (will be set up with bot instance later)
+    webhook_router = WebhookRouter()
+    # If allowed_users has a single user, set their chat as default target
+    if config.allowed_users and len(config.allowed_users) == 1:
+        webhook_router.default_chat_id = config.allowed_users[0]
+
     return {
         "bot": bot,
         "claude_integration": claude_integration,
+        "agent_manager": agent_manager,
         "storage": storage,
         "config": config,
+        "webhook_router": webhook_router,
     }
 
 
@@ -178,6 +196,7 @@ async def run_application(app: Dict[str, Any]) -> None:
     logger = structlog.get_logger()
     bot: ClaudeCodeBot = app["bot"]
     claude_integration: ClaudeIntegration = app["claude_integration"]
+    agent_manager: AgentProcessManager = app["agent_manager"]
     storage: Storage = app["storage"]
 
     # Set up signal handlers for graceful shutdown
@@ -190,6 +209,11 @@ async def run_application(app: Dict[str, Any]) -> None:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Start webhook notification server if port is configured
+    webhook_server = None
+    config: Settings = app["config"]
+    webhook_router: WebhookRouter = app["webhook_router"]
+
     try:
         # Start the bot
         logger.info("Starting Claude Code Telegram Bot")
@@ -198,9 +222,40 @@ async def run_application(app: Dict[str, Any]) -> None:
         bot_task = asyncio.create_task(bot.start())
         shutdown_task = asyncio.create_task(shutdown_event.wait())
 
+        # Start webhook server after bot is initialized (we need bot.app.bot)
+        async def _start_webhook_server():
+            """Start webhook server once the bot is ready."""
+            # Wait for bot to initialize
+            while not bot.app or not bot.app.bot:
+                await asyncio.sleep(0.5)
+
+            github_secret = (
+                config.github_webhook_secret.get_secret_value()
+                if config.github_webhook_secret
+                else None
+            )
+            notif_secret = (
+                config.webhook_notifications_secret.get_secret_value()
+                if config.webhook_notifications_secret
+                else None
+            )
+
+            nonlocal webhook_server
+            webhook_server = WebhookServer(
+                bot=bot.app.bot,
+                router=webhook_router,
+                port=config.webhook_notifications_port,
+                webhook_secret=notif_secret,
+                github_secret=github_secret,
+            )
+            await webhook_server.start()
+
+        webhook_task = asyncio.create_task(_start_webhook_server())
+
         # Wait for either bot completion or shutdown signal
         done, pending = await asyncio.wait(
-            [bot_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED
+            [bot_task, shutdown_task, webhook_task],
+            return_when=asyncio.FIRST_COMPLETED,
         )
 
         # Cancel remaining tasks
@@ -211,6 +266,12 @@ async def run_application(app: Dict[str, Any]) -> None:
             except asyncio.CancelledError:
                 pass
 
+        # Check if webhook task failed (log but don't crash the bot)
+        if webhook_task in done and not webhook_task.cancelled():
+            exc = webhook_task.exception()
+            if exc:
+                logger.error("Webhook server failed", error=str(exc))
+
     except Exception as e:
         logger.error("Application error", error=str(e))
         raise
@@ -219,6 +280,9 @@ async def run_application(app: Dict[str, Any]) -> None:
         logger.info("Shutting down application")
 
         try:
+            if webhook_server:
+                await webhook_server.stop()
+            await agent_manager.shutdown()
             await bot.stop()
             await claude_integration.shutdown()
             await storage.close()

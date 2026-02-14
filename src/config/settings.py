@@ -73,24 +73,8 @@ class Settings(BaseSettings):
     )
     use_sdk: bool = Field(True, description="Use Python SDK instead of CLI subprocess")
     claude_allowed_tools: Optional[List[str]] = Field(
-        default=[
-            "Read",
-            "Write",
-            "Edit",
-            "Bash",
-            "Glob",
-            "Grep",
-            "LS",
-            "Task",
-            "MultiEdit",
-            "NotebookRead",
-            "NotebookEdit",
-            "WebFetch",
-            "TodoRead",
-            "TodoWrite",
-            "WebSearch",
-        ],
-        description="List of allowed Claude tools",
+        default=None,
+        description="List of allowed Claude tools (None = all tools including MCP)",
     )
     claude_disallowed_tools: Optional[List[str]] = Field(
         default=["git commit", "git push"],
@@ -126,13 +110,42 @@ class Settings(BaseSettings):
     )
 
     # Features
-    enable_mcp: bool = Field(False, description="Enable Model Context Protocol")
-    mcp_config_path: Optional[Path] = Field(
-        None, description="MCP configuration file path"
-    )
     enable_git_integration: bool = Field(True, description="Enable git commands")
     enable_file_uploads: bool = Field(True, description="Enable file upload handling")
     enable_quick_actions: bool = Field(True, description="Enable quick action buttons")
+
+    # Multi-agent settings
+    max_concurrent_agents: int = Field(
+        5, description="Max concurrent agents per user", ge=1, le=20
+    )
+
+    # Voice / audio settings
+    openai_api_key: Optional[SecretStr] = Field(
+        None, description="OpenAI API key for Whisper transcription and TTS"
+    )
+    voice_mode: str = Field(
+        "off", description="Voice mode: on, off, or auto"
+    )
+    tts_engine: str = Field(
+        "openai", description="TTS engine: openai, kokoro, chatterbox"
+    )
+    tts_voice: str = Field(
+        "alloy", description="TTS voice name (engine-specific)"
+    )
+    proactive_briefings: bool = Field(
+        False, description="Send proactive audio briefings on agent events"
+    )
+
+    # Webhook notification settings
+    webhook_notifications_port: int = Field(
+        9090, description="Port for inbound webhook notifications (GitHub, CI, etc.)"
+    )
+    webhook_notifications_secret: Optional[SecretStr] = Field(
+        None, description="Secret for verifying inbound webhook payloads"
+    )
+    github_webhook_secret: Optional[SecretStr] = Field(
+        None, description="GitHub webhook secret for signature verification"
+    )
 
     # Monitoring
     log_level: str = Field("INFO", description="Logging level")
@@ -158,6 +171,8 @@ class Settings(BaseSettings):
         """Parse comma-separated user IDs."""
         if isinstance(v, str):
             return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
+        if isinstance(v, int):
+            return [v]
         return v  # type: ignore[no-any-return]
 
     @field_validator("approved_directory")
@@ -173,17 +188,6 @@ class Settings(BaseSettings):
         if not path.is_dir():
             raise ValueError(f"Approved directory is not a directory: {path}")
         return path  # type: ignore[no-any-return]
-
-    @field_validator("mcp_config_path", mode="before")
-    @classmethod
-    def validate_mcp_config(cls, v: Any, info: Any) -> Optional[Path]:
-        """Validate MCP configuration path if MCP is enabled."""
-        # Note: In Pydantic v2, we'll need to check enable_mcp after model creation
-        if v and isinstance(v, str):
-            v = Path(v)
-        if v and not v.exists():
-            raise ValueError(f"MCP config file does not exist: {v}")
-        return v  # type: ignore[no-any-return]
 
     @field_validator("log_level")
     @classmethod
@@ -202,10 +206,6 @@ class Settings(BaseSettings):
             raise ValueError(
                 "auth_token_secret required when enable_token_auth is True"
             )
-
-        # Check MCP requirements
-        if self.enable_mcp and not self.mcp_config_path:
-            raise ValueError("mcp_config_path required when enable_mcp is True")
 
         return self
 

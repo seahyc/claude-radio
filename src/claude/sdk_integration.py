@@ -171,11 +171,13 @@ class ClaudeSDKManager:
 
         try:
             # Build Claude Code options
-            options = ClaudeCodeOptions(
-                max_turns=self.config.claude_max_turns,
-                cwd=str(working_directory),
-                allowed_tools=self.config.claude_allowed_tools,
-            )
+            options_kwargs = {
+                "max_turns": self.config.claude_max_turns,
+                "cwd": str(working_directory),
+            }
+            if self.config.claude_allowed_tools:
+                options_kwargs["allowed_tools"] = self.config.claude_allowed_tools
+            options = ClaudeCodeOptions(**options_kwargs)
 
             # Resume previous session if we have a session_id
             if session_id and continue_session:

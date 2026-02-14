@@ -41,6 +41,15 @@ async def handle_callback_query(
             "conversation": handle_conversation_callback,
             "git": handle_git_callback,
             "export": handle_export_callback,
+            "agent_approve": handle_agent_approve_callback,
+            "agent_diff": handle_agent_diff_callback,
+            "agent_diff_page": handle_agent_diff_page_callback,
+            "agent_diff_close": handle_agent_diff_close_callback,
+            "agent_reject": handle_agent_reject_callback,
+            "agent_followup": handle_agent_followup_callback,
+            "agent_output": handle_agent_output_callback,
+            "agent_retry": handle_agent_retry_callback,
+            "agent_push": handle_agent_push_callback,
         }
 
         handler = handlers.get(action)
@@ -184,6 +193,8 @@ async def handle_action_callback(
         "refresh_status": _handle_refresh_status_action,
         "refresh_ls": _handle_refresh_ls_action,
         "export": _handle_export_action,
+        "refresh_dash": _handle_refresh_dash_action,
+        "agents_list": _handle_agents_list_action,
     }
 
     handler = actions.get(action_type)
@@ -729,6 +740,77 @@ async def _handle_refresh_ls_action(query, context: ContextTypes.DEFAULT_TYPE) -
     await _handle_ls_action(query, context)
 
 
+async def _handle_refresh_dash_action(
+    query, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle refresh dashboard action."""
+    user_id = query.from_user.id
+    settings: Settings = context.bot_data["settings"]
+    agent_manager = context.bot_data.get("agent_manager")
+
+    if not agent_manager:
+        await query.edit_message_text("❌ Agent system not available.")
+        return
+
+    from ..features.dashboard import format_dashboard
+
+    agents = agent_manager.get_all_agents(user_id)
+    stats = agent_manager.get_user_stats(user_id)
+    current_dir = context.user_data.get(
+        "current_directory", settings.approved_directory
+    )
+
+    text = format_dashboard(agents, stats, current_dir)
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🤖 Agents", callback_data="action:agents_list"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="action:refresh_dash"),
+        ],
+    ])
+
+    await query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=keyboard
+    )
+
+
+async def _handle_agents_list_action(
+    query, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle agents list action (from dashboard button)."""
+    user_id = query.from_user.id
+    agent_manager = context.bot_data.get("agent_manager")
+
+    if not agent_manager:
+        await query.edit_message_text("❌ Agent system not available.")
+        return
+
+    agents = agent_manager.get_all_agents(user_id)
+    if not agents:
+        await query.edit_message_text(
+            "🤖 *No agents*\n\nSpawn one with `/run <task>`",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["🤖 *Your Agents*\n"]
+    for a in agents:
+        elapsed = int(a.duration_seconds)
+        m, s = divmod(elapsed, 60)
+        lines.append(f"{a.status_emoji()} *{a.agent_id}*: {a.short_task} ({m}m{s}s)")
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎛 Dashboard", callback_data="action:refresh_dash"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="action:agents_list"),
+        ],
+    ])
+
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode="Markdown", reply_markup=keyboard
+    )
+
+
 async def _handle_export_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle export action."""
     await query.edit_message_text(
@@ -1142,6 +1224,273 @@ async def handle_export_callback(
             "Export failed", error=str(e), user_id=user_id, format=export_format
         )
         await query.edit_message_text(f"❌ **Export Failed**\n\n{str(e)}")
+
+
+async def handle_agent_approve_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle agent approval — commit changes."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        await query.edit_message_text("❌ Invalid callback data")
+        return
+
+    agent_user_id, agent_id = int(parts[0]), int(parts[1])
+    agent_manager = context.bot_data.get("agent_manager")
+
+    if not agent_manager:
+        await query.edit_message_text("❌ Agent system not available.")
+        return
+
+    agent = agent_manager.get_agent(agent_user_id, agent_id)
+    if not agent:
+        await query.edit_message_text(f"❌ Agent {agent_id} not found.")
+        return
+
+    from ..features.approval_workflow import commit_changes
+
+    await query.edit_message_text(f"⏳ Committing Agent {agent_id}'s changes...")
+
+    commit_msg = f"Agent {agent_id}: {agent.task_description[:60]}"
+    success, output = await commit_changes(agent.project_path, commit_msg)
+
+    if success:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🚀 Push",
+                callback_data=f"agent_push:{agent_user_id}:{agent_id}",
+            )]
+        ])
+        await query.edit_message_text(
+            f"✅ *Committed*\n\n{output[:500]}",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+    else:
+        await query.edit_message_text(f"❌ Commit failed:\n{output[:500]}")
+
+
+async def handle_agent_diff_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle showing the full diff for an agent."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        await query.edit_message_text("❌ Invalid callback data")
+        return
+
+    agent_user_id, agent_id = int(parts[0]), int(parts[1])
+    agent_manager = context.bot_data.get("agent_manager")
+
+    if not agent_manager:
+        await query.edit_message_text("❌ Agent system not available.")
+        return
+
+    agent = agent_manager.get_agent(agent_user_id, agent_id)
+    if not agent:
+        await query.edit_message_text(f"❌ Agent {agent_id} not found.")
+        return
+
+    from ..features.approval_workflow import get_file_diff
+    from ..features.diff_viewer import diff_navigation_keyboard, paginate_diff
+
+    import asyncio
+    proc = await asyncio.create_subprocess_exec(
+        "git", "diff", "--no-color",
+        cwd=agent.project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    diff_text = stdout.decode()
+
+    if not diff_text.strip():
+        await query.edit_message_text("📊 No unstaged changes to show.")
+        return
+
+    page_text, has_prev, has_next = paginate_diff(diff_text, page=0)
+    keyboard = diff_navigation_keyboard(agent_user_id, agent_id, 0, has_prev, has_next)
+
+    await query.edit_message_text(
+        page_text,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_agent_diff_page_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle diff page navigation."""
+    parts = param.split(":")
+    if len(parts) < 3:
+        await query.edit_message_text("❌ Invalid callback data")
+        return
+
+    agent_user_id, agent_id, page = int(parts[0]), int(parts[1]), int(parts[2])
+    agent_manager = context.bot_data.get("agent_manager")
+
+    agent = agent_manager.get_agent(agent_user_id, agent_id) if agent_manager else None
+    if not agent:
+        await query.edit_message_text(f"❌ Agent {agent_id} not found.")
+        return
+
+    import asyncio
+    proc = await asyncio.create_subprocess_exec(
+        "git", "diff", "--no-color",
+        cwd=agent.project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    diff_text = stdout.decode()
+
+    from ..features.diff_viewer import diff_navigation_keyboard, paginate_diff
+    page_text, has_prev, has_next = paginate_diff(diff_text, page=page)
+    keyboard = diff_navigation_keyboard(agent_user_id, agent_id, page, has_prev, has_next)
+
+    await query.edit_message_text(
+        page_text,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_agent_diff_close_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Close the diff viewer."""
+    await query.edit_message_text("📊 Diff viewer closed.")
+
+
+async def handle_agent_reject_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reject agent changes."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        return
+    agent_id = int(parts[1])
+    await query.edit_message_text(
+        f"❌ Agent {agent_id}'s changes rejected.\n"
+        f"Use `/agent {agent_id} <instructions>` to give further directions.",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_agent_followup_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Prompt user to send follow-up to an agent."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        return
+    agent_id = int(parts[1])
+    await query.edit_message_text(
+        f"💬 Send a follow-up to Agent {agent_id}:\n\n"
+        f"`/agent {agent_id} your message here`",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_agent_output_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show full agent output."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        return
+
+    agent_user_id, agent_id = int(parts[0]), int(parts[1])
+    agent_manager = context.bot_data.get("agent_manager")
+
+    agent = agent_manager.get_agent(agent_user_id, agent_id) if agent_manager else None
+    if not agent:
+        await query.edit_message_text(f"❌ Agent {agent_id} not found.")
+        return
+
+    output = agent.result_summary or agent.error_message or "_No output available_"
+    if len(output) > 4000:
+        output = output[:4000] + "\n\n_... truncated ..._"
+
+    await query.edit_message_text(
+        f"📊 *Agent {agent_id} Output*\n\n{output}",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_agent_retry_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Retry a failed agent."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        return
+
+    agent_user_id, agent_id = int(parts[0]), int(parts[1])
+    agent_manager = context.bot_data.get("agent_manager")
+    progress_monitor = context.bot_data.get("progress_monitor")
+
+    agent = agent_manager.get_agent(agent_user_id, agent_id) if agent_manager else None
+    if not agent:
+        await query.edit_message_text(f"❌ Agent {agent_id} not found.")
+        return
+
+    async def on_status_update(a, activity):
+        if progress_monitor:
+            await progress_monitor.update_status(a, activity)
+
+    async def on_complete(a):
+        if progress_monitor:
+            await progress_monitor.flush_pending(a)
+            await progress_monitor.show_completion(a)
+
+    result = await agent_manager.direct_agent(
+        user_id=agent_user_id,
+        agent_id=agent_id,
+        message=agent.task_description,
+        on_status_update=on_status_update,
+        on_complete=on_complete,
+    )
+
+    if result:
+        if progress_monitor:
+            await progress_monitor.create_status_message(result)
+        await query.edit_message_text(f"🔄 Retrying Agent {agent_id}...")
+    else:
+        await query.edit_message_text(f"❌ Could not retry Agent {agent_id}.")
+
+
+async def handle_agent_push_callback(
+    query, param: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle pushing committed agent changes to remote."""
+    parts = param.split(":")
+    if len(parts) < 2:
+        await query.edit_message_text("❌ Invalid callback data")
+        return
+
+    agent_user_id, agent_id = int(parts[0]), int(parts[1])
+    agent_manager = context.bot_data.get("agent_manager")
+
+    agent = agent_manager.get_agent(agent_user_id, agent_id) if agent_manager else None
+    if not agent:
+        await query.edit_message_text(f"❌ Agent {agent_id} not found.")
+        return
+
+    from ..features.approval_workflow import push_changes
+
+    await query.edit_message_text(f"⏳ Pushing Agent {agent_id}'s changes...")
+
+    success, output = await push_changes(agent.project_path)
+
+    if success:
+        await query.edit_message_text(
+            f"🚀 *Pushed successfully*\n\n{output[:500]}",
+            parse_mode="Markdown",
+        )
+    else:
+        await query.edit_message_text(f"❌ Push failed:\n{output[:500]}")
 
 
 def _format_file_size(size: int) -> str:

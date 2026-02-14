@@ -125,55 +125,6 @@ def test_auth_token_validation():
         assert settings.auth_secret_str == "secret123"
 
 
-def test_mcp_config_validation(tmp_path, monkeypatch):
-    """Test MCP configuration validation."""
-    test_dir = tmp_path / "projects"
-    test_dir.mkdir()
-
-    # Clear any MCP-related environment variables
-    monkeypatch.delenv("ENABLE_MCP", raising=False)
-    monkeypatch.delenv("MCP_CONFIG_PATH", raising=False)
-
-    # Should fail when MCP enabled but no config path
-    with pytest.raises(ValidationError) as exc_info:
-        Settings(
-            telegram_bot_token="test_token",
-            telegram_bot_username="test_bot",
-            approved_directory=str(test_dir),
-            enable_mcp=True,
-            mcp_config_path=None,
-        )
-
-    assert "mcp_config_path required" in str(exc_info.value)
-
-    # Should fail when config file doesn't exist
-    with pytest.raises(ValidationError) as exc_info:
-        Settings(
-            telegram_bot_token="test_token",
-            telegram_bot_username="test_bot",
-            approved_directory=str(test_dir),
-            enable_mcp=True,
-            mcp_config_path="/nonexistent/config.json",
-        )
-
-    assert "does not exist" in str(exc_info.value)
-
-    # Should succeed when config file exists
-    config_file = tmp_path / "mcp_config.json"
-    config_file.write_text('{"test": true}')
-
-    settings = Settings(
-        telegram_bot_token="test_token",
-        telegram_bot_username="test_bot",
-        approved_directory=str(test_dir),
-        enable_mcp=True,
-        mcp_config_path=str(config_file),
-    )
-
-    assert settings.enable_mcp is True
-    assert settings.mcp_config_path == config_file
-
-
 def test_log_level_validation():
     """Test log level validation."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -234,12 +185,7 @@ def test_computed_properties(tmp_path):
 
 def test_feature_flags():
     """Test feature flag system."""
-    # Create test MCP config file before creating settings
-    Path("/tmp/test.json").write_text('{"test": true}')
-
     settings = create_test_config(
-        enable_mcp=True,
-        mcp_config_path="/tmp/test.json",
         enable_git_integration=True,
         enable_file_uploads=False,
         enable_token_auth=True,
@@ -248,13 +194,11 @@ def test_feature_flags():
 
     features = FeatureFlags(settings)
 
-    assert features.mcp_enabled is True
     assert features.git_enabled is True
     assert features.file_uploads_enabled is False
     assert features.token_auth_enabled is True
 
     enabled_features = features.get_enabled_features()
-    assert "mcp" in enabled_features
     assert "git" in enabled_features
     assert "file_uploads" not in enabled_features
     assert "token_auth" in enabled_features
@@ -262,9 +206,6 @@ def test_feature_flags():
     # Test generic feature check
     assert features.is_feature_enabled("git") is True
     assert features.is_feature_enabled("nonexistent") is False
-
-    # Cleanup test file
-    Path("/tmp/test.json").unlink(missing_ok=True)
 
 
 def test_environment_loading():

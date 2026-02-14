@@ -59,11 +59,32 @@ class ClaudeCodeBot:
         self.feature_registry = FeatureRegistry(
             config=self.settings,
             storage=self.deps.get("storage"),
-            security=self.deps.get("security"),
+            security=self.deps.get("security_validator"),
         )
 
         # Add feature registry to dependencies
         self.deps["features"] = self.feature_registry
+
+        # Create progress monitor now that we have the bot instance
+        from ..agents.monitor import AgentProgressMonitor
+        progress_monitor = AgentProgressMonitor(self.app.bot)
+        self.deps["progress_monitor"] = progress_monitor
+
+        # Create voice pipeline if voice mode is not disabled
+        if self.settings.voice_mode != "off":
+            try:
+                from .features.voice_pipeline import VoicePipeline
+                agent_manager = self.deps.get("agent_manager")
+                if agent_manager:
+                    voice_pipeline = VoicePipeline(
+                        settings=self.settings,
+                        bot=self.app.bot,
+                        agent_manager=agent_manager,
+                    )
+                    self.deps["voice_pipeline"] = voice_pipeline
+                    logger.info("Voice pipeline initialized", mode=self.settings.voice_mode)
+            except Exception as e:
+                logger.warning("Failed to initialize voice pipeline", error=str(e))
 
         # Set bot commands for menu
         await self._set_bot_commands()
@@ -84,17 +105,19 @@ class ClaudeCodeBot:
         commands = [
             BotCommand("start", "Start bot and show help"),
             BotCommand("help", "Show available commands"),
-            BotCommand("new", "Clear context and start fresh session"),
-            BotCommand("continue", "Explicitly continue last session"),
-            BotCommand("end", "End current session and clear context"),
+            BotCommand("run", "Spawn an agent: /run <task>"),
+            BotCommand("agents", "List all running agents"),
+            BotCommand("stop", "Stop agent: /stop <id|all>"),
+            BotCommand("agent", "Direct agent: /agent <id> <msg>"),
+            BotCommand("dash", "Command center dashboard"),
+            BotCommand("new", "Start fresh session"),
             BotCommand("ls", "List files in current directory"),
-            BotCommand("cd", "Change directory (resumes project session)"),
+            BotCommand("cd", "Change directory"),
             BotCommand("pwd", "Show current directory"),
             BotCommand("projects", "Show all projects"),
             BotCommand("status", "Show session status"),
-            BotCommand("export", "Export current session"),
-            BotCommand("actions", "Show quick actions"),
             BotCommand("git", "Git repository commands"),
+            BotCommand("export", "Export current session"),
         ]
 
         await self.app.bot.set_my_commands(commands)
@@ -103,6 +126,7 @@ class ClaudeCodeBot:
     def _register_handlers(self) -> None:
         """Register all command and message handlers."""
         from .handlers import callback, command, message
+        from .handlers import agent_commands
 
         # Command handlers
         handlers = [
@@ -119,6 +143,12 @@ class ClaudeCodeBot:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
+            # Multi-agent commands
+            ("run", agent_commands.run_command),
+            ("agents", agent_commands.agents_command),
+            ("stop", agent_commands.stop_command),
+            ("agent", agent_commands.agent_command),
+            ("dash", agent_commands.dash_command),
         ]
 
         for cmd, handler in handlers:
@@ -142,6 +172,14 @@ class ClaudeCodeBot:
 
         self.app.add_handler(
             MessageHandler(filters.PHOTO, self._inject_deps(message.handle_photo)),
+            group=10,
+        )
+
+        self.app.add_handler(
+            MessageHandler(
+                filters.VOICE | filters.AUDIO,
+                self._inject_deps(message.handle_voice_message),
+            ),
             group=10,
         )
 
